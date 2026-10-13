@@ -2,6 +2,7 @@ package com.example.roombooking.booking;
 
 import java.time.Clock;
 import java.time.Duration;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.LinkedHashMap;
@@ -72,6 +73,28 @@ public class BookingService {
         Booking booking = bookingRepository.findById(id)
                 .orElseThrow(() -> new NotFoundException("Booking " + id + " not found"));
         return BookingResponse.from(booking);
+    }
+
+    @Transactional(readOnly = true)
+    public List<BookingResponse> listRoomBookings(Long roomId, LocalDate date) {
+        if (!roomRepository.existsById(roomId)) {
+            throw new NotFoundException("Room " + roomId + " not found");
+        }
+        LocalDateTime dayStart = date.atStartOfDay();
+        LocalDateTime dayEnd = date.plusDays(1).atStartOfDay();
+        return bookingRepository.findOverlapping(roomId, BookingStatus.ACTIVE, dayStart, dayEnd)
+                .stream()
+                .map(BookingResponse::from)
+                .toList();
+    }
+
+    @Transactional
+    public void cancelBooking(Long id) {
+        Booking booking = bookingRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("Booking " + id + " not found"));
+        if (booking.getStatus() == BookingStatus.ACTIVE) {
+            booking.cancel(LocalDateTime.now(clock));
+        }
     }
 
     private Map<String, String> validate(CreateBookingRequest request, Room room, Set<String> attendees) {
