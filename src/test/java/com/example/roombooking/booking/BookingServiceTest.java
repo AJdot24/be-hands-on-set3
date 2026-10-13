@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
+import com.example.roombooking.booking.dto.BookingCreationResult;
 import com.example.roombooking.booking.dto.BookingResponse;
 import com.example.roombooking.booking.dto.CreateBookingRequest;
 import com.example.roombooking.error.BadRequestException;
@@ -35,6 +36,8 @@ class BookingServiceTest {
     private BookingRepository bookingRepository;
     @Mock
     private RoomRepository roomRepository;
+    @Mock
+    private IdempotencyKeyRepository idempotencyKeyRepository;
 
     private BookingService bookingService;
     private Room room;
@@ -42,7 +45,7 @@ class BookingServiceTest {
     @BeforeEach
     void setUp() {
         Clock clock = Clock.fixed(NOW.toInstant(ZoneOffset.UTC), ZoneOffset.UTC);
-        bookingService = new BookingService(bookingRepository, roomRepository, clock);
+        bookingService = new BookingService(bookingRepository, roomRepository, idempotencyKeyRepository, clock);
         room = new Room("Aspen", 4, true);
         ReflectionTestUtils.setField(room, "id", 1L);
     }
@@ -56,9 +59,11 @@ class BookingServiceTest {
             return saved;
         });
 
-        BookingResponse response = bookingService.createBooking(
-                request(day(10, 0), day(11, 0), List.of("Bob@Example.com", "bob@example.com")));
+        BookingCreationResult result = bookingService.createBooking(
+                request(day(10, 0), day(11, 0), List.of("Bob@Example.com", "bob@example.com")), null);
+        BookingResponse response = result.booking();
 
+        assertThat(result.replayed()).isFalse();
         assertThat(response.id()).isEqualTo(42L);
         assertThat(response.roomName()).isEqualTo("Aspen");
         assertThat(response.organiserEmail()).isEqualTo("ann@example.com");
@@ -71,7 +76,7 @@ class BookingServiceTest {
     void rejectsBookingThatEndsBeforeItStarts() {
         givenRoomExists();
 
-        assertThatThrownBy(() -> bookingService.createBooking(request(day(11, 0), day(10, 30), null)))
+        assertThatThrownBy(() -> bookingService.createBooking(request(day(11, 0), day(10, 30), null), null))
                 .isInstanceOf(BadRequestException.class)
                 .satisfies(ex -> assertThat(((BadRequestException) ex).getFieldErrors())
                         .containsKey("end"));
@@ -81,7 +86,7 @@ class BookingServiceTest {
     void rejectsBookingSpanningMultipleDays() {
         givenRoomExists();
 
-        assertThatThrownBy(() -> bookingService.createBooking(request(day(17, 0), dayPlus(1, 9, 0), null)))
+        assertThatThrownBy(() -> bookingService.createBooking(request(day(17, 0), dayPlus(1, 9, 0), null), null))
                 .isInstanceOf(BadRequestException.class)
                 .satisfies(ex -> assertThat(((BadRequestException) ex).getFieldErrors())
                         .containsKey("start"));
@@ -91,7 +96,7 @@ class BookingServiceTest {
     void rejectsBookingStartingBeforeWorkingHours() {
         givenRoomExists();
 
-        assertThatThrownBy(() -> bookingService.createBooking(request(day(8, 45), day(9, 30), null)))
+        assertThatThrownBy(() -> bookingService.createBooking(request(day(8, 45), day(9, 30), null), null))
                 .isInstanceOf(BadRequestException.class)
                 .satisfies(ex -> assertThat(((BadRequestException) ex).getFieldErrors())
                         .containsEntry("start", "must be at or after 09:00"));
@@ -101,7 +106,7 @@ class BookingServiceTest {
     void rejectsBookingEndingAfterWorkingHours() {
         givenRoomExists();
 
-        assertThatThrownBy(() -> bookingService.createBooking(request(day(17, 30), day(18, 15), null)))
+        assertThatThrownBy(() -> bookingService.createBooking(request(day(17, 30), day(18, 15), null), null))
                 .isInstanceOf(BadRequestException.class)
                 .satisfies(ex -> assertThat(((BadRequestException) ex).getFieldErrors())
                         .containsEntry("end", "must be at or before 18:00"));
@@ -111,7 +116,7 @@ class BookingServiceTest {
     void rejectsTimesOffTheFifteenMinuteGrid() {
         givenRoomExists();
 
-        assertThatThrownBy(() -> bookingService.createBooking(request(day(10, 0), day(11, 7), null)))
+        assertThatThrownBy(() -> bookingService.createBooking(request(day(10, 0), day(11, 7), null), null))
                 .isInstanceOf(BadRequestException.class)
                 .satisfies(ex -> assertThat(((BadRequestException) ex).getFieldErrors())
                         .containsKey("end"));
@@ -121,7 +126,7 @@ class BookingServiceTest {
     void rejectsBookingLongerThanFourHours() {
         givenRoomExists();
 
-        assertThatThrownBy(() -> bookingService.createBooking(request(day(9, 0), day(13, 15), null)))
+        assertThatThrownBy(() -> bookingService.createBooking(request(day(9, 0), day(13, 15), null), null))
                 .isInstanceOf(BadRequestException.class)
                 .satisfies(ex -> assertThat(((BadRequestException) ex).getFieldErrors())
                         .containsEntry("end", "must be at most 4 hours after start"));
@@ -132,7 +137,8 @@ class BookingServiceTest {
         givenRoomExists();
         LocalDateTime yesterday = LocalDateTime.of(2026, 1, 4, 10, 0);
 
-        assertThatThrownBy(() -> bookingService.createBooking(request(yesterday, yesterday.plusHours(1), null)))
+        assertThatThrownBy(() -> bookingService.createBooking(
+                request(yesterday, yesterday.plusHours(1), null), null))
                 .isInstanceOf(BadRequestException.class)
                 .satisfies(ex -> assertThat(((BadRequestException) ex).getFieldErrors().get("start"))
                         .contains("past"));
@@ -143,7 +149,7 @@ class BookingServiceTest {
         givenRoomExists();
 
         assertThatThrownBy(() -> bookingService.createBooking(request(day(10, 0), day(11, 0),
-                List.of("b@example.com", "c@example.com", "d@example.com", "e@example.com"))))
+                List.of("b@example.com", "c@example.com", "d@example.com", "e@example.com")), null))
                 .isInstanceOf(BadRequestException.class)
                 .satisfies(ex -> assertThat(((BadRequestException) ex).getFieldErrors().get("attendees"))
                         .contains("exceeds room capacity (4)"));
@@ -153,7 +159,7 @@ class BookingServiceTest {
     void collectsMultipleFieldErrorsInOneResponse() {
         givenRoomExists();
 
-        assertThatThrownBy(() -> bookingService.createBooking(request(day(8, 45), day(18, 30), null)))
+        assertThatThrownBy(() -> bookingService.createBooking(request(day(8, 45), day(18, 30), null), null))
                 .isInstanceOf(BadRequestException.class)
                 .satisfies(ex -> assertThat(((BadRequestException) ex).getFieldErrors())
                         .containsKeys("start", "end"));
@@ -168,7 +174,7 @@ class BookingServiceTest {
         when(bookingRepository.findOverlapping(1L, BookingStatus.ACTIVE, day(10, 30), day(11, 30)))
                 .thenReturn(List.of(clash));
 
-        assertThatThrownBy(() -> bookingService.createBooking(request(day(10, 30), day(11, 30), null)))
+        assertThatThrownBy(() -> bookingService.createBooking(request(day(10, 30), day(11, 30), null), null))
                 .isInstanceOf(ConflictException.class)
                 .hasMessageContaining("booking 7")
                 .hasMessageContaining("Standup")
@@ -182,7 +188,9 @@ class BookingServiceTest {
                 .thenReturn(List.of());
         when(bookingRepository.save(any(Booking.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        BookingResponse response = bookingService.createBooking(request(day(11, 0), day(12, 0), null));
+        BookingResponse response = bookingService
+                .createBooking(request(day(11, 0), day(12, 0), null), null)
+                .booking();
 
         assertThat(response.start()).isEqualTo(day(11, 0));
         assertThat(response.end()).isEqualTo(day(12, 0));
@@ -193,9 +201,39 @@ class BookingServiceTest {
         when(roomRepository.findByIdForUpdate(99L)).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> bookingService.createBooking(
-                new CreateBookingRequest(99L, "Standup", "ann@example.com", null, day(10, 0), day(11, 0))))
+                new CreateBookingRequest(99L, "Standup", "ann@example.com", null, day(10, 0), day(11, 0)), null))
                 .isInstanceOf(NotFoundException.class)
                 .hasMessageContaining("Room 99");
+    }
+
+    @Test
+    void replayWithSameIdempotencyKeyReturnsOriginalBooking() {
+        givenRoomExists();
+        CreateBookingRequest request = request(day(10, 0), day(11, 0), null);
+        Booking original = new Booking(room, "Standup", "ann@example.com", Set.of("ann@example.com"),
+                day(10, 0), day(11, 0), NOW);
+        ReflectionTestUtils.setField(original, "id", 21L);
+        when(idempotencyKeyRepository.findById("key-1")).thenReturn(Optional.of(
+                new IdempotencyKey("key-1", RequestHasher.hash(request), original, NOW)));
+
+        BookingCreationResult result = bookingService.createBooking(request, "key-1");
+
+        assertThat(result.replayed()).isTrue();
+        assertThat(result.booking().id()).isEqualTo(21L);
+    }
+
+    @Test
+    void reuseOfIdempotencyKeyWithDifferentPayloadIsRejected() {
+        givenRoomExists();
+        CreateBookingRequest originalRequest = request(day(11, 0), day(12, 0), null);
+        Booking original = new Booking(room, "Standup", "ann@example.com", Set.of("ann@example.com"),
+                day(11, 0), day(12, 0), NOW);
+        when(idempotencyKeyRepository.findById("key-1")).thenReturn(Optional.of(
+                new IdempotencyKey("key-1", RequestHasher.hash(originalRequest), original, NOW)));
+
+        assertThatThrownBy(() -> bookingService.createBooking(request(day(10, 0), day(11, 0), null), "key-1"))
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining("different request payload");
     }
 
     private void givenRoomExists() {

@@ -10,8 +10,10 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
+import com.example.roombooking.booking.dto.BookingCreationResult;
 import com.example.roombooking.booking.dto.BookingResponse;
 import com.example.roombooking.booking.dto.CreateBookingRequest;
 import com.example.roombooking.error.BadRequestException;
@@ -32,20 +34,42 @@ public class BookingService {
 
     private final BookingRepository bookingRepository;
     private final RoomRepository roomRepository;
+    private final IdempotencyKeyRepository idempotencyKeyRepository;
     private final Clock clock;
 
-    public BookingService(BookingRepository bookingRepository, RoomRepository roomRepository, Clock clock) {
+    public BookingService(BookingRepository bookingRepository, RoomRepository roomRepository,
+                          IdempotencyKeyRepository idempotencyKeyRepository, Clock clock) {
         this.bookingRepository = bookingRepository;
         this.roomRepository = roomRepository;
+        this.idempotencyKeyRepository = idempotencyKeyRepository;
         this.clock = clock;
     }
 
+    /**
+     * Creates a booking. When an {@code Idempotency-Key} is supplied, replays of
+     * the same request return the originally created booking instead of creating
+     * a duplicate, and reusing a key with a different payload is rejected.
+     */
     @Transactional
-    public BookingResponse createBooking(CreateBookingRequest request) {
+    public BookingCreationResult createBooking(CreateBookingRequest request, String idempotencyKey) {
         // Lock the room row first: concurrent creates for the same room are
         // serialized in the database, so the overlap check below cannot race.
         Room room = roomRepository.findByIdForUpdate(request.roomId())
                 .orElseThrow(() -> new NotFoundException("Room " + request.roomId() + " not found"));
+
+        String requestHash = idempotencyKey == null ? null : RequestHasher.hash(request);
+        if (idempotencyKey != null) {
+            // Checked after acquiring the room lock: a concurrent retry with the
+            // same key waits for the first request to commit and then finds this row.
+            Optional<IdempotencyKey> existing = idempotencyKeyRepository.findById(idempotencyKey);
+            if (existing.isPresent()) {
+                if (!existing.get().getRequestHash().equals(requestHash)) {
+                    throw new ConflictException("Idempotency-Key '" + idempotencyKey
+                            + "' was already used with a different request payload", null);
+                }
+                return new BookingCreationResult(BookingResponse.from(existing.get().getBooking()), true);
+            }
+        }
 
         Set<String> attendees = normalizeAttendees(request.organiserEmail(), request.attendees());
         Map<String, String> fieldErrors = validate(request, room, attendees);
@@ -65,7 +89,12 @@ public class BookingService {
         Booking booking = new Booking(room, request.title().trim(),
                 normalizeEmail(request.organiserEmail()), attendees,
                 request.start(), request.end(), LocalDateTime.now(clock));
-        return BookingResponse.from(bookingRepository.save(booking));
+        Booking saved = bookingRepository.save(booking);
+        if (idempotencyKey != null) {
+            idempotencyKeyRepository.save(new IdempotencyKey(idempotencyKey, requestHash, saved,
+                    LocalDateTime.now(clock)));
+        }
+        return new BookingCreationResult(BookingResponse.from(saved), false);
     }
 
     @Transactional(readOnly = true)
