@@ -6,7 +6,7 @@ Meeting room booking REST API built with **Java 17**, **Spring Boot 3.5**, **Spr
 
 | # | Question | PR |
 |---|----------|----|
-| 1 | Room Booking API | _to be linked_ |
+| 1 | Room Booking API | [#1](https://github.com/AJdot24/be-hands-on-set3/pull/1) |
 | 2 | Free Slots & Safe Booking | _to be linked_ |
 
 ## How to run
