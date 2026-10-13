@@ -21,4 +21,15 @@ public interface BookingRepository extends JpaRepository<Booking, Long> {
                                   @Param("status") BookingStatus status,
                                   @Param("start") LocalDateTime start,
                                   @Param("end") LocalDateTime end);
+
+    @Query("""
+            select b from Booking b
+            where b.status = :status
+              and b.startAt < :end
+              and b.endAt > :start
+            order by b.startAt
+            """)
+    List<Booking> findActiveBetween(@Param("status") BookingStatus status,
+                                    @Param("start") LocalDateTime start,
+                                    @Param("end") LocalDateTime end);
 }
