@@ -14,6 +14,7 @@ import java.util.Set;
 import com.example.roombooking.booking.dto.BookingResponse;
 import com.example.roombooking.booking.dto.CreateBookingRequest;
 import com.example.roombooking.error.BadRequestException;
+import com.example.roombooking.error.ConflictException;
 import com.example.roombooking.error.NotFoundException;
 import com.example.roombooking.room.Room;
 import com.example.roombooking.room.RoomRepository;
@@ -40,13 +41,24 @@ public class BookingService {
 
     @Transactional
     public BookingResponse createBooking(CreateBookingRequest request) {
-        Room room = roomRepository.findById(request.roomId())
+        // Lock the room row first: concurrent creates for the same room are
+        // serialized in the database, so the overlap check below cannot race.
+        Room room = roomRepository.findByIdForUpdate(request.roomId())
                 .orElseThrow(() -> new NotFoundException("Room " + request.roomId() + " not found"));
 
         Set<String> attendees = normalizeAttendees(request.organiserEmail(), request.attendees());
         Map<String, String> fieldErrors = validate(request, room, attendees);
         if (!fieldErrors.isEmpty()) {
             throw new BadRequestException(fieldErrors);
+        }
+
+        List<Booking> overlapping = bookingRepository.findOverlapping(
+                room.getId(), BookingStatus.ACTIVE, request.start(), request.end());
+        if (!overlapping.isEmpty()) {
+            Booking clash = overlapping.get(0);
+            throw new ConflictException("Room '" + room.getName() + "' is already booked from "
+                    + clash.getStartAt() + " to " + clash.getEndAt()
+                    + " (booking " + clash.getId() + " '" + clash.getTitle() + "')", clash.getId());
         }
 
         Booking booking = new Booking(room, request.title().trim(),
